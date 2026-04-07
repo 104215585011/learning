@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>登录</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="page">
+    <section class="login-card" aria-labelledby="login-title">
+      <h1 id="login-title">欢迎登录</h1>
+      <p class="subtitle">请输入账号和密码继续</p>
+
+      <form id="login-form" class="form" novalidate>
+        <label for="username">用户名</label>
+        <input
+          id="username"
+          name="username"
+          type="text"
+          placeholder="请输入用户名"
+          autocomplete="username"
+          required
+        />
+
+        <label for="password">密码</label>
+        <input
+          id="password"
+          name="password"
+          type="password"
+          placeholder="请输入密码"
+          autocomplete="current-password"
+          required
+        />
+
+        <div class="row">
+          <label class="checkbox">
+            <input id="remember" name="remember" type="checkbox" />
+            <span>记住我</span>
+          </label>
+          <a href="#" class="link">忘记密码？</a>
+        </div>
+
+        <button id="submit-btn" type="submit">登录</button>
+        <p id="message" class="message" aria-live="polite"></p>
+      </form>
+    </section>
+  </main>
+
+  <script src="./script.js"></script>
+</body>
+</html>
