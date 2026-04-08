@@ -1,8 +1,10 @@
 <script setup>
 import { computed, reactive, watch } from 'vue'
+import ReaderWorkspace from './ReaderWorkspace.vue'
 
 const props = defineProps({
   user: { type: Object, required: true },
+  token: { type: String, required: true },
   stats: { type: Object, required: true },
   pages: { type: Array, required: true },
   activePage: { type: String, required: true },
@@ -60,6 +62,7 @@ watch(
 
 const navItems = computed(() => [
   { key: 'home', label: '首页', icon: 'HM' },
+  { key: 'reader', label: '沉浸阅读', icon: 'RD' },
   { key: 'profile', label: '个人中心', icon: 'ME' },
   ...props.pages.map((page) => ({
     key: page.slug,
@@ -281,6 +284,10 @@ const deletePage = () => {
             </div>
           </section>
         </div>
+      </section>
+
+      <section v-else-if="activePage === 'reader'" class="panel-stack">
+        <ReaderWorkspace :token="token" />
       </section>
 
       <section v-else-if="activePage === 'profile'" class="panel-stack profile-page">

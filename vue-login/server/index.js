@@ -2,8 +2,11 @@ import bcrypt from 'bcryptjs'
 import express from 'express'
 import dotenv from 'dotenv'
 import fs from 'fs'
+import fsp from 'fs/promises'
 import multer from 'multer'
+import mammoth from 'mammoth'
 import path from 'path'
+import { PDFParse } from 'pdf-parse'
 import { fileURLToPath } from 'url'
 import {
   createSessionToken,
@@ -26,8 +29,10 @@ const defaultAvatar =
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const uploadsDir = path.join(__dirname, 'uploads')
+const docsDir = path.join(uploadsDir, 'docs')
 
 fs.mkdirSync(uploadsDir, { recursive: true })
+fs.mkdirSync(docsDir, { recursive: true })
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, uploadsDir),
@@ -38,6 +43,27 @@ const storage = multer.diskStorage({
 })
 
 const upload = multer({ storage })
+const documentUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, docsDir),
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname || '') || '.txt'
+      cb(null, `${Date.now()}-${Math.random().toString(36).slice(2, 10)}${ext}`)
+    },
+  }),
+  limits: {
+    fileSize: 100 * 1024 * 1024,
+  },
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || '').toLowerCase()
+    const allowed = new Set(['.pdf', '.doc', '.docx', '.txt', '.md', '.rtf'])
+    if (!allowed.has(ext)) {
+      cb(new Error('仅支持 PDF、Word、TXT、Markdown、RTF 文件。'))
+      return
+    }
+    cb(null, true)
+  },
+})
 
 app.use(express.json({ limit: '5mb' }))
 app.use('/uploads', express.static(uploadsDir))
@@ -122,6 +148,62 @@ const getStats = async () => {
     totalUsers: Number(users.total || 0),
     todayLogins: Number(todayLogins.total || 0),
   }
+}
+
+const stripBinaryNoise = (text) =>
+  String(text || '')
+    .replace(/\u0000/g, '')
+    .replace(/\r/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+
+const escapeHtml = (text) =>
+  String(text || '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+
+const textToHtml = (text) => {
+  const safe = escapeHtml(text)
+  return safe
+    .split(/\n{2,}/)
+    .map((part) => `<p>${part.replaceAll('\n', '<br />')}</p>`)
+    .join('\n')
+}
+
+const extractDocumentContent = async (filePath, ext) => {
+  if (ext === '.pdf') {
+    const buffer = await fsp.readFile(filePath)
+    const parser = new PDFParse({ data: buffer })
+    const parsed = await parser.getText()
+    await parser.destroy()
+    const text = stripBinaryNoise(parsed?.text)
+    return { text, html: textToHtml(text) }
+  }
+
+  if (ext === '.docx') {
+    const htmlResult = await mammoth.convertToHtml({ path: filePath })
+    const rawResult = await mammoth.extractRawText({ path: filePath })
+    const text = stripBinaryNoise(rawResult.value)
+    return { text, html: htmlResult.value || textToHtml(text) }
+  }
+
+  if (ext === '.txt' || ext === '.md' || ext === '.rtf') {
+    const content = await fsp.readFile(filePath, 'utf8')
+    const text = stripBinaryNoise(content)
+    return { text, html: textToHtml(text) }
+  }
+
+  // Legacy .doc has no reliable pure-js parser; fallback to best-effort decode.
+  if (ext === '.doc') {
+    const content = await fsp.readFile(filePath)
+    const text = stripBinaryNoise(content.toString('utf8'))
+    return { text, html: textToHtml(text) }
+  }
+
+  return { text: '', html: '' }
 }
 
 app.get('/api/health', async (_req, res) => {
@@ -232,6 +314,127 @@ app.post('/api/upload-avatar', upload.single('avatar'), async (req, res) => {
   await db.execute(`UPDATE \`${usersTable}\` SET avatar_url = ? WHERE id = ?`, [avatarUrl, auth.user.id])
   const [rows] = await db.execute(`SELECT * FROM \`${usersTable}\` WHERE id = ? LIMIT 1`, [auth.user.id])
   return res.json({ ok: true, message: '头像上传成功。', avatarUrl, user: mapUser(rows[0]) })
+})
+
+app.post('/api/documents/upload', documentUpload.single('document'), async (req, res) => {
+  const auth = await requireUser(req, res)
+  if (!auth) return
+  if (!req.file) return res.status(400).json({ ok: false, message: '请选择要上传的文件。' })
+
+  const ext = path.extname(req.file.originalname || '').toLowerCase()
+
+  try {
+    const extracted = await extractDocumentContent(req.file.path, ext)
+    if (!extracted.text) {
+      return res.status(400).json({
+        ok: false,
+        message: '未提取到有效文本，请检查文件内容或更换格式。',
+      })
+    }
+
+    return res.json({
+      ok: true,
+      message: '文件上传并解析成功。',
+      document: {
+        name: req.file.originalname,
+        size: req.file.size,
+        type: ext.replace('.', ''),
+        text: extracted.text,
+        html: extracted.html,
+        originalUrl: `/uploads/docs/${req.file.filename}`,
+      },
+    })
+  } catch (error) {
+    return res.status(500).json({ ok: false, message: '文件解析失败，请稍后重试。', detail: error.message })
+  }
+})
+
+app.get('/api/translate', async (req, res) => {
+  const auth = await requireUser(req, res)
+  if (!auth) return
+  const word = String(req.query?.word || '').trim()
+  if (!word) return res.status(400).json({ ok: false, message: '待翻译单词不能为空。' })
+
+  try {
+    let translation = ''
+    let phonetic = ''
+    const examples = []
+    const synonyms = new Set()
+    const meanings = []
+
+    const dictResp = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`)
+    if (dictResp.ok) {
+      const dictData = await dictResp.json()
+      const entry = Array.isArray(dictData) ? dictData[0] : null
+      phonetic = entry?.phonetic || entry?.phonetics?.find((item) => item?.text)?.text || ''
+
+      const entryMeanings = Array.isArray(entry?.meanings) ? entry.meanings : []
+      for (const meaning of entryMeanings.slice(0, 4)) {
+        const partOfSpeech = meaning?.partOfSpeech || ''
+        const def = meaning?.definitions?.[0]
+        if (!def?.definition) continue
+        meanings.push({
+          partOfSpeech,
+          definition: def.definition,
+        })
+        if (def.example && examples.length < 4) examples.push(def.example)
+        for (const syn of (def.synonyms || []).slice(0, 6)) synonyms.add(syn)
+      }
+    }
+
+    const response = await fetch(
+      `https://api.mymemory.translated.net/get?q=${encodeURIComponent(word)}&langpair=en|zh-CN`,
+    )
+    const data = await response.json()
+    translation =
+      data?.responseData?.translatedText ||
+      data?.matches?.find((item) => item.translation)?.translation ||
+      ''
+
+    if (!translation && meanings.length) {
+      translation = meanings[0].definition
+    }
+
+    if (!translation) {
+      return res.status(502).json({ ok: false, message: '翻译服务暂不可用，请稍后重试。' })
+    }
+
+    return res.json({
+      ok: true,
+      word,
+      translatedText: translation,
+      phonetic,
+      examples,
+      synonyms: [...synonyms].slice(0, 12),
+      meanings,
+    })
+  } catch (error) {
+    return res.status(502).json({ ok: false, message: '翻译服务调用失败。', detail: error.message })
+  }
+})
+
+app.get('/api/translate-sentence', async (req, res) => {
+  const auth = await requireUser(req, res)
+  if (!auth) return
+  const text = String(req.query?.text || '').trim()
+  if (!text) return res.status(400).json({ ok: false, message: '待翻译句子不能为空。' })
+
+  try {
+    const response = await fetch(
+      `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|zh-CN`,
+    )
+    const data = await response.json()
+    const translatedText =
+      data?.responseData?.translatedText ||
+      data?.matches?.find((item) => item.translation)?.translation ||
+      ''
+    if (!translatedText) {
+      return res.status(502).json({ ok: false, message: '句子翻译服务暂不可用，请稍后重试。' })
+    }
+    return res.json({ ok: true, text, translatedText })
+  } catch (error) {
+    return res.status(502).json({ ok: false, message: '句子翻译服务调用失败。', detail: error.message })
+  }
 })
 
 app.post('/api/pages', async (req, res) => {
@@ -353,6 +556,21 @@ app.put('/api/profile', async (req, res) => {
   )
   const [rows] = await db.execute(`SELECT * FROM \`${usersTable}\` WHERE id = ? LIMIT 1`, [auth.user.id])
   return res.json({ ok: true, message: '个人信息已更新。', user: mapUser(rows[0]) })
+})
+
+app.use((error, _req, res, _next) => {
+  if (error instanceof multer.MulterError) {
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ ok: false, message: '文件大小不能超过 100MB。' })
+    }
+    return res.status(400).json({ ok: false, message: error.message || '文件上传失败。' })
+  }
+
+  if (error?.message?.includes('仅支持')) {
+    return res.status(400).json({ ok: false, message: error.message })
+  }
+
+  return res.status(500).json({ ok: false, message: '服务器处理请求时发生异常。', detail: error?.message })
 })
 
 const start = async () => {

@@ -232,6 +232,7 @@ onBeforeUnmount(() => {
       :global-message="globalMessage"
       :pages="pages"
       :stats="stats"
+      :token="token"
       :user="user"
       @create-page="handleCreatePage"
       @delete-page="handleDeletePage"
