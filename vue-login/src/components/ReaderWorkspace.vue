@@ -1,43 +1,63 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { apiRequest } from '../api'
 
 const props = defineProps({
   token: { type: String, required: true },
+  userId: { type: [Number, String], required: true },
 })
 
-const BOOK_KEY = 'reader-word-book'
-const SENTENCE_BOOK_KEY = 'reader-sentence-book'
-const HIGHLIGHT_KEY = 'reader-highlighted-words'
-const DOC_KEY = 'reader-last-document'
+const storageKey = computed(() => `reader-workspace-v3-${props.userId}`)
+const vocabularyKey = computed(() => `reader-vocabulary-v3-${props.userId}`)
+const sentenceKey = computed(() => `reader-sentences-v3-${props.userId}`)
 
 const loading = ref(false)
 const message = ref('')
 const selectedWord = ref('')
+const selectedSentence = ref('')
+const translatingWord = ref(false)
+const translatingSentence = ref(false)
+const vocabularyBook = ref([])
+const sentenceBook = ref([])
 const translation = reactive({
   translatedText: '',
   phonetic: '',
   examples: [],
   synonyms: [],
   meanings: [],
+  detectedSourceLanguage: 'auto',
+  targetLanguage: 'zh-CN',
 })
-const translating = ref(false)
-const readingText = ref(localStorage.getItem(DOC_KEY) || '')
-const readingHtml = ref('')
-const documentUrl = ref('')
-const viewMode = ref('focus')
-const selectedSentence = ref('')
-const sentenceTranslation = ref('')
-const translatingSentence = ref(false)
-const highlightedWords = ref(new Set(JSON.parse(localStorage.getItem(HIGHLIGHT_KEY) || '[]')))
-const vocabularyBook = ref(JSON.parse(localStorage.getItem(BOOK_KEY) || '[]'))
-const sentenceBook = ref(JSON.parse(localStorage.getItem(SENTENCE_BOOK_KEY) || '[]'))
+const sentenceTranslation = reactive({
+  translatedText: '',
+  detectedSourceLanguage: 'auto',
+  targetLanguage: 'zh-CN',
+})
+const workspace = reactive({
+  documents: [],
+  windows: [],
+  activeWindowId: '',
+  sourceLanguage: 'auto',
+  targetLanguage: 'zh-CN',
+})
 
-const uploadMeta = reactive({
-  name: '',
-  size: 0,
-  type: '',
-})
+const languageOptions = [
+  { label: '自动识别', value: 'auto' },
+  { label: '中文', value: 'zh-CN' },
+  { label: '英语', value: 'en' },
+  { label: '西班牙语', value: 'es' },
+  { label: '法语', value: 'fr' },
+  { label: '德语', value: 'de' },
+  { label: '日语', value: 'ja' },
+  { label: '韩语', value: 'ko' },
+  { label: '俄语', value: 'ru' },
+  { label: '葡萄牙语', value: 'pt' },
+  { label: '意大利语', value: 'it' },
+]
+
+const paginationCache = new Map()
+
+const createId = (prefix) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
 const formatSize = (size) => {
   if (!size) return '0 B'
@@ -46,24 +66,247 @@ const formatSize = (size) => {
   return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 
-const saveLocal = () => {
-  localStorage.setItem(BOOK_KEY, JSON.stringify(vocabularyBook.value))
-  localStorage.setItem(SENTENCE_BOOK_KEY, JSON.stringify(sentenceBook.value))
-  localStorage.setItem(HIGHLIGHT_KEY, JSON.stringify([...highlightedWords.value]))
-  localStorage.setItem(DOC_KEY, readingText.value)
+const loadLocalState = () => {
+  try {
+    const savedWorkspace = JSON.parse(localStorage.getItem(storageKey.value) || '{}')
+    workspace.documents = Array.isArray(savedWorkspace.documents) ? savedWorkspace.documents : []
+    workspace.windows = Array.isArray(savedWorkspace.windows) ? savedWorkspace.windows : []
+    workspace.activeWindowId = savedWorkspace.activeWindowId || workspace.windows[0]?.id || ''
+    workspace.sourceLanguage = savedWorkspace.sourceLanguage || 'auto'
+    workspace.targetLanguage = savedWorkspace.targetLanguage || 'zh-CN'
+  } catch {
+    workspace.documents = []
+    workspace.windows = []
+    workspace.activeWindowId = ''
+  }
+
+  try {
+    vocabularyBook.value = JSON.parse(localStorage.getItem(vocabularyKey.value) || '[]')
+  } catch {
+    vocabularyBook.value = []
+  }
+
+  try {
+    sentenceBook.value = JSON.parse(localStorage.getItem(sentenceKey.value) || '[]')
+  } catch {
+    sentenceBook.value = []
+  }
+
+  if (!workspace.windows.length && workspace.documents.length) {
+    workspace.windows = [
+      {
+        id: createId('window'),
+        documentId: workspace.documents[0].id,
+      },
+    ]
+    workspace.activeWindowId = workspace.windows[0].id
+  }
 }
 
-const normalizedWord = (word) => String(word || '').toLowerCase().replace(/[^a-z']/gi, '')
+const persistWorkspace = () => {
+  localStorage.setItem(
+    storageKey.value,
+    JSON.stringify({
+      documents: workspace.documents,
+      windows: workspace.windows,
+      activeWindowId: workspace.activeWindowId,
+      sourceLanguage: workspace.sourceLanguage,
+      targetLanguage: workspace.targetLanguage,
+    }),
+  )
+}
 
-const tokens = computed(() => {
-  const source = readingText.value
-  if (!source) return []
-  return source
+const persistBooks = () => {
+  localStorage.setItem(vocabularyKey.value, JSON.stringify(vocabularyBook.value))
+  localStorage.setItem(sentenceKey.value, JSON.stringify(sentenceBook.value))
+}
+
+loadLocalState()
+
+watch(
+  () => [workspace.documents, workspace.windows, workspace.activeWindowId, workspace.sourceLanguage, workspace.targetLanguage],
+  persistWorkspace,
+  { deep: true },
+)
+
+watch([vocabularyBook, sentenceBook], persistBooks, { deep: true })
+
+const ensureSegmenter = () => {
+  if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+    return new Intl.Segmenter(undefined, { granularity: 'word' })
+  }
+  return null
+}
+
+const segmenter = ensureSegmenter()
+
+const splitParagraph = (paragraph) => {
+  if (!paragraph) return []
+
+  if (segmenter) {
+    return Array.from(segmenter.segment(paragraph)).map((item) => ({
+      text: item.segment,
+      isWord: Boolean(item.isWordLike),
+    }))
+  }
+
+  return paragraph
+    .split(/(\s+|[^\p{L}\p{N}_'-]+)/u)
+    .filter((item) => item.length > 0)
+    .map((item) => ({
+      text: item,
+      isWord: /[\p{L}\p{N}]/u.test(item),
+    }))
+}
+
+const paginateDocument = (document) => {
+  if (!document?.text) return []
+
+  const cacheKey = `${document.id}:${document.text.length}`
+  if (paginationCache.has(cacheKey)) {
+    return paginationCache.get(cacheKey)
+  }
+
+  const paragraphs = String(document.text)
     .split(/\n{2,}/)
-    .map((block) => block.split(/(\s+|[^\w']+)/g).filter((item) => item.length > 0))
+    .map((item) => item.trim())
+    .filter(Boolean)
+
+  const pages = []
+  let currentPage = []
+  let currentLength = 0
+  const pageLimit = 1200
+
+  for (const paragraph of paragraphs) {
+    const block = {
+      text: paragraph,
+      segments: splitParagraph(paragraph),
+    }
+    const paragraphLength = paragraph.length
+
+    if (currentPage.length && currentLength + paragraphLength > pageLimit) {
+      pages.push(currentPage)
+      currentPage = []
+      currentLength = 0
+    }
+
+    currentPage.push(block)
+    currentLength += paragraphLength
+  }
+
+  if (currentPage.length) {
+    pages.push(currentPage)
+  }
+
+  const finalPages = pages.length ? pages : [[{ text: document.text, segments: splitParagraph(document.text) }]]
+  paginationCache.set(cacheKey, finalPages)
+  return finalPages
+}
+
+const documentMap = computed(() => {
+  const map = new Map()
+  for (const document of workspace.documents) {
+    map.set(document.id, document)
+  }
+  return map
 })
 
-const isWord = (token) => /^[A-Za-z][A-Za-z']*$/.test(token)
+const activeWindow = computed(() => workspace.windows.find((item) => item.id === workspace.activeWindowId) || null)
+
+const windowViews = computed(() =>
+  workspace.windows.map((windowItem) => {
+    const document = documentMap.value.get(windowItem.documentId) || null
+    const pages = paginateDocument(document)
+    const pageCount = pages.length
+    const pageIndex = Math.min(Math.max(Number(document?.lastPage || 0), 0), Math.max(pageCount - 1, 0))
+
+    return {
+      ...windowItem,
+      document,
+      pages,
+      pageCount,
+      pageIndex,
+      currentPage: pages[pageIndex] || [],
+    }
+  }),
+)
+
+const hasDocuments = computed(() => workspace.documents.length > 0)
+
+const openWindowForDocument = (documentId) => {
+  if (!documentId) return
+  const windowId = createId('window')
+  workspace.windows.push({
+    id: windowId,
+    documentId,
+  })
+  workspace.activeWindowId = windowId
+}
+
+const addEmptyWindow = () => {
+  if (!workspace.documents.length) return
+  openWindowForDocument(workspace.documents[0].id)
+}
+
+const closeWindow = (windowId) => {
+  workspace.windows = workspace.windows.filter((item) => item.id !== windowId)
+  if (!workspace.windows.length && workspace.documents.length) {
+    workspace.windows = [
+      {
+        id: createId('window'),
+        documentId: workspace.documents[0].id,
+      },
+    ]
+  }
+  if (!workspace.windows.find((item) => item.id === workspace.activeWindowId)) {
+    workspace.activeWindowId = workspace.windows[0]?.id || ''
+  }
+}
+
+const updateWindowDocument = (windowId, documentId) => {
+  const windowItem = workspace.windows.find((item) => item.id === windowId)
+  if (!windowItem) return
+  windowItem.documentId = documentId
+  workspace.activeWindowId = windowId
+}
+
+const setDocumentPage = (documentId, nextPage) => {
+  const document = workspace.documents.find((item) => item.id === documentId)
+  if (!document) return
+  const pageCount = paginateDocument(document).length
+  document.lastPage = Math.min(Math.max(nextPage, 0), Math.max(pageCount - 1, 0))
+}
+
+const goToPage = (windowId, offset) => {
+  const windowView = windowViews.value.find((item) => item.id === windowId)
+  if (!windowView?.document) return
+  setDocumentPage(windowView.document.id, windowView.pageIndex + offset)
+  workspace.activeWindowId = windowId
+}
+
+const removeDocument = (documentId) => {
+  workspace.documents = workspace.documents.filter((item) => item.id !== documentId)
+  workspace.windows = workspace.windows.filter((item) => item.documentId !== documentId)
+  if (!workspace.windows.length && workspace.documents.length) {
+    workspace.windows = [
+      {
+        id: createId('window'),
+        documentId: workspace.documents[0].id,
+      },
+    ]
+  }
+  workspace.activeWindowId = workspace.windows[0]?.id || ''
+}
+
+const activeDocument = computed(() => {
+  if (!activeWindow.value) return null
+  return documentMap.value.get(activeWindow.value.documentId) || null
+})
+
+const normalizedWord = (word) =>
+  String(word || '')
+    .trim()
+    .toLocaleLowerCase()
 
 const handleUpload = async (event) => {
   const file = event.target.files?.[0]
@@ -92,32 +335,28 @@ const handleUpload = async (event) => {
     if (!response.ok || data.ok === false) {
       throw new Error(data.message || '文件上传失败。')
     }
-    readingText.value = data.document.text
-    readingHtml.value = data.document.html || ''
-    documentUrl.value = data.document.originalUrl || ''
-    uploadMeta.name = data.document.name
-    uploadMeta.size = data.document.size
-    uploadMeta.type = data.document.type
-    message.value = '文档解析成功，点击单词即可高亮、翻译并加入生词本。'
-    saveLocal()
+
+    const document = {
+      id: createId('doc'),
+      name: data.document.name,
+      size: data.document.size,
+      type: data.document.type,
+      text: data.document.text,
+      html: data.document.html || '',
+      originalUrl: data.document.originalUrl || '',
+      lastPage: 0,
+      createdAt: new Date().toISOString(),
+    }
+
+    workspace.documents.unshift(document)
+    openWindowForDocument(document.id)
+    message.value = '文档解析成功，已加入阅读工作区。'
   } catch (error) {
     message.value = error.message
   } finally {
     loading.value = false
     event.target.value = ''
   }
-}
-
-const toggleHighlight = (word) => {
-  const key = normalizedWord(word)
-  if (!key) return
-  if (highlightedWords.value.has(key)) {
-    highlightedWords.value.delete(key)
-  } else {
-    highlightedWords.value.add(key)
-  }
-  highlightedWords.value = new Set(highlightedWords.value)
-  saveLocal()
 }
 
 const translateWord = async (word) => {
@@ -127,18 +366,51 @@ const translateWord = async (word) => {
   translation.examples = []
   translation.synonyms = []
   translation.meanings = []
-  translating.value = true
+  translatingWord.value = true
+
   try {
-    const data = await apiRequest(`/api/translate?word=${encodeURIComponent(word)}`, { token: props.token })
+    const data = await apiRequest(
+      `/api/translate?text=${encodeURIComponent(word)}&sourceLanguage=${encodeURIComponent(workspace.sourceLanguage)}&targetLanguage=${encodeURIComponent(workspace.targetLanguage)}`,
+      { token: props.token },
+    )
+
     translation.translatedText = data.translatedText || ''
     translation.phonetic = data.phonetic || ''
     translation.examples = Array.isArray(data.examples) ? data.examples : []
     translation.synonyms = Array.isArray(data.synonyms) ? data.synonyms : []
     translation.meanings = Array.isArray(data.meanings) ? data.meanings : []
+    translation.detectedSourceLanguage = data.detectedSourceLanguage || workspace.sourceLanguage
+    translation.targetLanguage = data.targetLanguage || workspace.targetLanguage
   } catch (error) {
     translation.translatedText = error.message
   } finally {
-    translating.value = false
+    translatingWord.value = false
+  }
+}
+
+const translateSelectedSentence = async () => {
+  const rawSelection = window.getSelection?.()?.toString() || ''
+  const text = rawSelection.trim().replace(/\s+/g, ' ')
+  if (!text) {
+    sentenceTranslation.translatedText = '请先在阅读窗口中选中一句完整的话。'
+    return
+  }
+
+  selectedSentence.value = text
+  translatingSentence.value = true
+
+  try {
+    const data = await apiRequest(
+      `/api/translate-sentence?text=${encodeURIComponent(text)}&sourceLanguage=${encodeURIComponent(workspace.sourceLanguage)}&targetLanguage=${encodeURIComponent(workspace.targetLanguage)}`,
+      { token: props.token },
+    )
+    sentenceTranslation.translatedText = data.translatedText || ''
+    sentenceTranslation.detectedSourceLanguage = data.detectedSourceLanguage || workspace.sourceLanguage
+    sentenceTranslation.targetLanguage = data.targetLanguage || workspace.targetLanguage
+  } catch (error) {
+    sentenceTranslation.translatedText = error.message
+  } finally {
+    translatingSentence.value = false
   }
 }
 
@@ -151,212 +423,236 @@ const addToVocabulary = () => {
       word: key,
       translatedText: translation.translatedText,
       phonetic: translation.phonetic,
-      examples: translation.examples,
-      synonyms: translation.synonyms,
+      sourceLanguage: translation.detectedSourceLanguage,
+      targetLanguage: translation.targetLanguage,
       createdAt: new Date().toISOString(),
     })
-    saveLocal()
-  }
-}
-
-const translateSelectedSentence = async () => {
-  const rawSelection = window.getSelection?.()?.toString() || ''
-  const text = rawSelection.trim().replace(/\s+/g, ' ')
-  if (!text) {
-    sentenceTranslation.value = '请先在左侧阅读区选中一句话。'
-    return
-  }
-  selectedSentence.value = text
-  translatingSentence.value = true
-  try {
-    const data = await apiRequest(`/api/translate-sentence?text=${encodeURIComponent(text)}`, { token: props.token })
-    sentenceTranslation.value = data.translatedText || ''
-  } catch (error) {
-    sentenceTranslation.value = error.message
-  } finally {
-    translatingSentence.value = false
   }
 }
 
 const addSentenceToBook = () => {
-  if (!selectedSentence.value || !sentenceTranslation.value) return
+  if (!selectedSentence.value || !sentenceTranslation.translatedText) return
   const exists = sentenceBook.value.some((item) => item.text === selectedSentence.value)
   if (!exists) {
     sentenceBook.value.unshift({
       text: selectedSentence.value,
-      translatedText: sentenceTranslation.value,
+      translatedText: sentenceTranslation.translatedText,
+      sourceLanguage: sentenceTranslation.detectedSourceLanguage,
+      targetLanguage: sentenceTranslation.targetLanguage,
       createdAt: new Date().toISOString(),
     })
-    saveLocal()
   }
-}
-
-const playPronunciation = (word) => {
-  if (!word || !window.speechSynthesis) return
-  const utterance = new SpeechSynthesisUtterance(word)
-  utterance.lang = 'en-US'
-  utterance.rate = 0.9
-  window.speechSynthesis.cancel()
-  window.speechSynthesis.speak(utterance)
-}
-
-const onWordClick = async (word) => {
-  toggleHighlight(word)
-  await translateWord(word)
 }
 
 const removeWord = (word) => {
   vocabularyBook.value = vocabularyBook.value.filter((item) => item.word !== word)
-  saveLocal()
 }
 
 const removeSentence = (text) => {
   sentenceBook.value = sentenceBook.value.filter((item) => item.text !== text)
-  saveLocal()
 }
 
-const onGlobalKeydown = (event) => {
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
-    event.preventDefault()
-    void translateSelectedSentence()
-    return
-  }
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'b') {
-    event.preventDefault()
-    addToVocabulary()
-  }
+const onTokenClick = async (token, windowId) => {
+  if (!token?.isWord || !token.text.trim()) return
+  workspace.activeWindowId = windowId
+  await translateWord(token.text.trim())
 }
-
-onMounted(() => {
-  window.addEventListener('keydown', onGlobalKeydown)
-})
-
-onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onGlobalKeydown)
-})
 </script>
 
 <template>
   <article class="reader">
     <header class="reader-head">
       <div>
-        <p class="reader-tag">Focused Reading</p>
-        <h3>文档沉浸阅读</h3>
-        <p>支持 PDF / Word / TXT / Markdown / RTF（最大 100MB）</p>
+        <p class="reader-tag">Immersive Reading</p>
+        <h3>多文档分页阅读工作区</h3>
+        <p>支持 PDF / Word / TXT / Markdown / RTF，多窗口同时阅读，并自动记住上次页码。</p>
       </div>
-      <label class="upload-btn">
-        <input type="file" accept=".pdf,.doc,.docx,.txt,.md,.rtf" :disabled="loading" @change="handleUpload" />
-        {{ loading ? '解析中...' : '上传文件' }}
-      </label>
+      <div class="head-actions">
+        <label class="upload-btn">
+          <input type="file" accept=".pdf,.doc,.docx,.txt,.md,.rtf" :disabled="loading" @change="handleUpload" />
+          {{ loading ? '解析中...' : '上传文档' }}
+        </label>
+        <button class="ghost-btn" :disabled="!hasDocuments" type="button" @click="addEmptyWindow">新增阅读窗口</button>
+      </div>
     </header>
 
     <p v-if="message" class="message">{{ message }}</p>
 
-    <div v-if="uploadMeta.name" class="meta">
-      <span>{{ uploadMeta.name }}</span>
-      <span>{{ uploadMeta.type.toUpperCase() }}</span>
-      <span>{{ formatSize(uploadMeta.size) }}</span>
-      <button class="ghost-btn" type="button" @click="viewMode = viewMode === 'focus' ? 'original' : 'focus'">
-        {{ viewMode === 'focus' ? '切换原文版式' : '切换学习版式' }}
-      </button>
-    </div>
+    <section class="settings-bar">
+      <label class="setting">
+        <span>源语言</span>
+        <select v-model="workspace.sourceLanguage">
+          <option v-for="item in languageOptions" :key="`source-${item.value}`" :value="item.value">{{ item.label }}</option>
+        </select>
+      </label>
+
+      <label class="setting">
+        <span>目标语言</span>
+        <select v-model="workspace.targetLanguage">
+          <option v-for="item in languageOptions.filter((entry) => entry.value !== 'auto')" :key="`target-${item.value}`" :value="item.value">
+            {{ item.label }}
+          </option>
+        </select>
+      </label>
+
+      <p class="setting-tip">当系统无法准确判断语言时，可以直接在这里指定翻译方向。</p>
+    </section>
 
     <section class="layout">
-      <main class="reading-panel">
-        <p v-if="!tokens.length" class="placeholder">上传文档后，这里会显示提取的文本内容。</p>
-        <template v-else>
-          <div v-if="viewMode === 'original' && readingHtml" class="original-html" v-html="readingHtml"></div>
-          <article v-else class="text-flow">
-            <p v-for="(block, blockIndex) in tokens" :key="`block-${blockIndex}`">
-              <template v-for="(token, idx) in block" :key="`${blockIndex}-${idx}-${token}`">
-                <span
-                  v-if="isWord(token)"
-                  :class="{ word: true, highlighted: highlightedWords.has(normalizedWord(token)) }"
-                  @click="onWordClick(token)"
-                >
-                  {{ token }}
-                </span>
-                <span v-else>{{ token }}</span>
-              </template>
-            </p>
-          </article>
-          <div v-if="viewMode === 'original' && documentUrl" class="original-file">
-            <h5>原文件预览</h5>
-            <iframe :src="documentUrl" title="原文预览"></iframe>
-          </div>
-        </template>
+      <main class="reader-main">
+        <div class="window-tabs">
+          <button
+            v-for="windowItem in windowViews"
+            :key="windowItem.id"
+            :class="{ active: workspace.activeWindowId === windowItem.id }"
+            type="button"
+            @click="workspace.activeWindowId = windowItem.id"
+          >
+            {{ windowItem.document?.name || '未选择文档' }}
+          </button>
+        </div>
+
+        <div v-if="!windowViews.length" class="empty-shell">
+          上传第一本书后，这里会生成阅读窗口。每本书都按页显示，并自动记录上次停留的位置。
+        </div>
+
+        <div v-else class="window-grid" :class="`count-${Math.min(windowViews.length, 3)}`">
+          <section
+            v-for="windowItem in windowViews"
+            :key="windowItem.id"
+            class="reader-window"
+            :class="{ focused: workspace.activeWindowId === windowItem.id }"
+            @click="workspace.activeWindowId = windowItem.id"
+          >
+            <header class="window-head">
+              <label class="window-select">
+                <span>当前文档</span>
+                <select :value="windowItem.documentId" @change="updateWindowDocument(windowItem.id, $event.target.value)">
+                  <option v-for="document in workspace.documents" :key="document.id" :value="document.id">{{ document.name }}</option>
+                </select>
+              </label>
+
+              <button class="close-button" type="button" @click.stop="closeWindow(windowItem.id)">关闭</button>
+            </header>
+
+            <div v-if="windowItem.document" class="window-meta">
+              <span>{{ windowItem.document.type.toUpperCase() }}</span>
+              <span>{{ formatSize(windowItem.document.size) }}</span>
+              <span>第 {{ windowItem.pageIndex + 1 }} / {{ windowItem.pageCount }} 页</span>
+            </div>
+
+            <article v-if="windowItem.document" class="page-card">
+              <p v-for="(paragraph, paragraphIndex) in windowItem.currentPage" :key="`${windowItem.id}-${paragraphIndex}`" class="page-paragraph">
+                <template v-for="(segment, segmentIndex) in paragraph.segments" :key="`${windowItem.id}-${paragraphIndex}-${segmentIndex}`">
+                  <button
+                    v-if="segment.isWord"
+                    class="word-chip"
+                    type="button"
+                    @click.stop="onTokenClick(segment, windowItem.id)"
+                  >
+                    {{ segment.text }}
+                  </button>
+                  <span v-else>{{ segment.text }}</span>
+                </template>
+              </p>
+            </article>
+
+            <div v-else class="empty-page">请先在这个窗口选择一本书。</div>
+
+            <footer v-if="windowItem.document" class="pager">
+              <button :disabled="windowItem.pageIndex <= 0" type="button" @click.stop="goToPage(windowItem.id, -1)">上一页</button>
+              <span>已记住到第 {{ windowItem.pageIndex + 1 }} 页</span>
+              <button :disabled="windowItem.pageIndex >= windowItem.pageCount - 1" type="button" @click.stop="goToPage(windowItem.id, 1)">下一页</button>
+            </footer>
+          </section>
+        </div>
       </main>
 
       <aside class="tool-panel">
         <section class="card">
-          <h4>单词学习</h4>
-          <p class="current">
-            {{ selectedWord || '点击左侧单词开始' }}
-            <span v-if="translation.phonetic" class="phonetic">{{ translation.phonetic }}</span>
-          </p>
-          <p class="translation">{{ translating ? '翻译中...' : translation.translatedText || '暂无翻译结果' }}</p>
-          <div class="btns">
-            <button type="button" :disabled="!selectedWord" @click="playPronunciation(selectedWord)">发音</button>
-            <button type="button" :disabled="!selectedWord || !translation.translatedText" @click="addToVocabulary">
-              加入生词本
-            </button>
+          <div class="section-head">
+            <h4>文档书架</h4>
+            <span>{{ workspace.documents.length }} 本</span>
+          </div>
+          <ul class="library-list">
+            <li v-for="document in workspace.documents" :key="document.id">
+              <div>
+                <strong>{{ document.name }}</strong>
+                <p>{{ document.type.toUpperCase() }} · {{ formatSize(document.size) }}</p>
+                <small>上次阅读到第 {{ (document.lastPage || 0) + 1 }} 页</small>
+              </div>
+              <div class="library-actions">
+                <button type="button" @click="openWindowForDocument(document.id)">新窗口打开</button>
+                <button class="danger" type="button" @click="removeDocument(document.id)">删除</button>
+              </div>
+            </li>
+            <li v-if="!workspace.documents.length" class="empty">还没有导入文档。</li>
+          </ul>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h4>单词翻译</h4>
+            <span>{{ translation.detectedSourceLanguage }} → {{ translation.targetLanguage }}</span>
+          </div>
+          <p class="current-word">{{ selectedWord || '点击任意阅读页里的完整词语开始翻译。' }}</p>
+          <p class="translation-result">{{ translatingWord ? '翻译中...' : translation.translatedText || '暂无翻译结果。' }}</p>
+          <p v-if="translation.phonetic" class="phonetic">{{ translation.phonetic }}</p>
+          <div class="action-row">
+            <button type="button" :disabled="!selectedWord || !translation.translatedText" @click="addToVocabulary">加入生词本</button>
           </div>
           <div v-if="translation.meanings.length" class="detail">
             <h5>释义</h5>
             <ul>
-              <li v-for="(meaning, idx) in translation.meanings" :key="`m-${idx}`">
+              <li v-for="(meaning, index) in translation.meanings" :key="`meaning-${index}`">
                 <strong v-if="meaning.partOfSpeech">{{ meaning.partOfSpeech }}:</strong>
                 {{ meaning.definition }}
               </li>
             </ul>
           </div>
-          <div v-if="translation.examples.length" class="detail">
-            <h5>例句</h5>
-            <ul>
-              <li v-for="(example, idx) in translation.examples" :key="`e-${idx}`">{{ example }}</li>
-            </ul>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h4>句子翻译</h4>
+            <span>{{ sentenceTranslation.detectedSourceLanguage }} → {{ sentenceTranslation.targetLanguage }}</span>
           </div>
-          <div v-if="translation.synonyms.length" class="detail">
-            <h5>同义词</h5>
-            <p class="synonyms">{{ translation.synonyms.join(' / ') }}</p>
+          <p class="tip">在任意阅读页中选中一句完整的话后，点击下面的按钮进行翻译。</p>
+          <p class="sentence-preview">{{ selectedSentence || '还没有选中句子。' }}</p>
+          <p class="translation-result">{{ translatingSentence ? '翻译中...' : sentenceTranslation.translatedText || '暂无句子翻译。' }}</p>
+          <div class="action-row">
+            <button type="button" @click="translateSelectedSentence">翻译选中句子</button>
+            <button type="button" :disabled="!selectedSentence || !sentenceTranslation.translatedText" @click="addSentenceToBook">
+              收藏句子
+            </button>
           </div>
         </section>
 
         <section class="card">
-          <h4>句子学习</h4>
-          <p class="tip">在左侧选中句子后，按 `Ctrl/Cmd + K` 或点按钮翻译。</p>
-          <p class="sentence">{{ selectedSentence || '还未选择句子' }}</p>
-          <p class="translation">{{ translatingSentence ? '翻译中...' : sentenceTranslation || '暂无句子翻译' }}</p>
-          <div class="btns">
-            <button type="button" @click="translateSelectedSentence">翻译选中句子</button>
-            <button type="button" :disabled="!selectedSentence || !sentenceTranslation" @click="addSentenceToBook">
-              收藏句子
-            </button>
-          </div>
-          <ul class="book sentence-book">
+          <h4>生词本</h4>
+          <ul class="book-list">
+            <li v-for="item in vocabularyBook" :key="item.word">
+              <div>
+                <strong>{{ item.word }}</strong>
+                <p>{{ item.translatedText }}</p>
+              </div>
+              <button class="danger" type="button" @click="removeWord(item.word)">删除</button>
+            </li>
+            <li v-if="!vocabularyBook.length" class="empty">还没有收藏词语。</li>
+          </ul>
+        </section>
+
+        <section class="card">
+          <h4>句子本</h4>
+          <ul class="book-list">
             <li v-for="item in sentenceBook" :key="item.text">
               <div>
                 <strong>{{ item.text }}</strong>
                 <p>{{ item.translatedText }}</p>
               </div>
-              <button type="button" @click="removeSentence(item.text)">删除</button>
+              <button class="danger" type="button" @click="removeSentence(item.text)">删除</button>
             </li>
             <li v-if="!sentenceBook.length" class="empty">还没有收藏句子。</li>
-          </ul>
-        </section>
-
-        <section class="card">
-          <h4>生词本（本地）</h4>
-          <ul class="book">
-            <li v-for="item in vocabularyBook" :key="item.word">
-              <div>
-                <strong>{{ item.word }}</strong>
-                <p>{{ item.translatedText }}</p>
-                <small v-if="item.phonetic">{{ item.phonetic }}</small>
-              </div>
-              <button type="button" @click="removeWord(item.word)">删除</button>
-            </li>
-            <li v-if="!vocabularyBook.length" class="empty">还没有生词，点击单词后可添加。</li>
           </ul>
         </section>
       </aside>
@@ -365,51 +661,391 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.reader { display: grid; gap: 16px; }
-.reader-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 20px; border-radius: 20px; background: #ffffff; box-shadow: inset 0 0 0 1px rgba(226,232,240,.9); }
-.reader-tag { margin: 0 0 6px; font-size: 12px; letter-spacing: .12em; color: #0f766e; text-transform: uppercase; }
-.reader-head h3 { margin: 0 0 6px; }
-.reader-head p { margin: 0; color: #64748b; }
-.upload-btn { display: inline-flex; align-items: center; justify-content: center; padding: 10px 14px; border-radius: 12px; background: #0f766e; color: #fff; cursor: pointer; font-weight: 700; }
-.upload-btn input { display: none; }
-.message { margin: 0; padding: 10px 12px; border-radius: 12px; background: #ecfeff; color: #0e7490; }
-.meta { display: flex; gap: 10px; flex-wrap: wrap; color: #334155; font-size: 13px; align-items: center; }
-.meta span { padding: 4px 8px; border-radius: 999px; background: #e2e8f0; }
-.ghost-btn { border: 1px solid #cbd5e1; border-radius: 999px; background: #fff; color: #0f172a; padding: 4px 10px; cursor: pointer; }
-.layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; }
-.reading-panel, .card { padding: 20px; border-radius: 20px; background: #fff; box-shadow: inset 0 0 0 1px rgba(226,232,240,.9); }
-.reading-panel { min-height: 520px; max-height: 72vh; overflow: auto; }
-.placeholder { color: #64748b; }
-.text-flow { margin: 0 auto; max-width: 860px; font-family: "Georgia", "Times New Roman", serif; font-size: 18px; line-height: 2; color: #0f172a; }
-.text-flow p { margin: 0 0 1.1em; text-align: justify; }
-.original-html { max-width: 900px; margin: 0 auto; line-height: 1.8; color: #1e293b; }
-.original-file { margin-top: 16px; }
-.original-file h5 { margin: 0 0 10px; }
-.original-file iframe { width: 100%; min-height: 420px; border: 1px solid #cbd5e1; border-radius: 12px; }
-.word { cursor: pointer; border-radius: 6px; padding: 1px 2px; transition: background .12s; }
-.word:hover { background: #dbeafe; }
-.word.highlighted { background: #fef08a; }
-.tool-panel { display: grid; gap: 12px; align-content: start; }
-.card h4 { margin: 0 0 10px; }
-.current { margin: 0 0 8px; font-size: 18px; font-weight: 700; }
-.phonetic { margin-left: 8px; color: #475569; font-weight: 500; font-size: 14px; }
-.translation { margin: 0; min-height: 40px; color: #334155; }
-.btns { display: flex; gap: 8px; margin-top: 10px; }
-.btns button { border: none; border-radius: 10px; padding: 8px 10px; background: #0f172a; color: #fff; cursor: pointer; }
-.btns button:disabled { opacity: .45; cursor: not-allowed; }
-.detail { margin-top: 12px; }
-.detail h5 { margin: 0 0 6px; font-size: 13px; color: #475569; }
-.detail ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; color: #334155; }
-.synonyms { margin: 0; color: #0f172a; line-height: 1.6; }
-.book { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; max-height: 320px; overflow: auto; }
-.book li { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; }
-.book strong { text-transform: lowercase; }
-.book p { margin: 4px 0 0; color: #64748b; font-size: 13px; }
-.book small { color: #94a3b8; }
-.book button { border: none; border-radius: 8px; padding: 4px 8px; background: #fee2e2; color: #b91c1c; cursor: pointer; }
-.empty { color: #64748b; font-size: 13px; }
-.tip { margin: 0 0 8px; color: #64748b; font-size: 12px; }
-.sentence { margin: 0; color: #1e293b; line-height: 1.7; }
-.sentence-book strong { text-transform: none; }
-@media (max-width: 1080px) { .layout { grid-template-columns: 1fr; } .reading-panel { max-height: none; } }
+.reader {
+  display: grid;
+  gap: 18px;
+}
+
+.reader-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 22px;
+  border-radius: 24px;
+  background: #fff;
+  box-shadow: inset 0 0 0 1px rgba(226, 232, 240, 0.9);
+}
+
+.reader-tag {
+  margin: 0 0 6px;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.reader-head h3 {
+  margin: 0 0 8px;
+}
+
+.reader-head p {
+  margin: 0;
+  color: #64748b;
+}
+
+.head-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.upload-btn,
+.ghost-btn,
+.pager button,
+.action-row button,
+.library-actions button,
+.close-button,
+.word-chip {
+  border: none;
+  cursor: pointer;
+}
+
+.upload-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: #0f766e;
+  color: #fff;
+  font-weight: 700;
+}
+
+.upload-btn input {
+  display: none;
+}
+
+.ghost-btn {
+  border-radius: 12px;
+  padding: 10px 14px;
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+.message {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #ecfeff;
+  color: #0e7490;
+}
+
+.settings-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: end;
+  padding: 18px 20px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: inset 0 0 0 1px rgba(226, 232, 240, 0.9);
+}
+
+.setting {
+  display: grid;
+  gap: 8px;
+  min-width: 180px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #334155;
+}
+
+.setting select {
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: #fff;
+  font: inherit;
+}
+
+.setting-tip {
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 18px;
+}
+
+.reader-main,
+.card {
+  padding: 20px;
+  border-radius: 24px;
+  background: #fff;
+  box-shadow: inset 0 0 0 1px rgba(226, 232, 240, 0.9);
+}
+
+.window-tabs {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.window-tabs button {
+  border: none;
+  border-radius: 999px;
+  padding: 8px 14px;
+  background: #e2e8f0;
+  color: #334155;
+  cursor: pointer;
+}
+
+.window-tabs button.active {
+  background: #0f766e;
+  color: #fff;
+}
+
+.window-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.window-grid.count-1 {
+  grid-template-columns: 1fr;
+}
+
+.reader-window {
+  border-radius: 22px;
+  padding: 18px;
+  background: #f8fafc;
+  box-shadow: inset 0 0 0 1px rgba(203, 213, 225, 0.8);
+}
+
+.reader-window.focused {
+  box-shadow: inset 0 0 0 2px rgba(15, 118, 110, 0.7);
+}
+
+.window-head,
+.section-head,
+.library-actions,
+.pager,
+.action-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.window-select {
+  display: grid;
+  gap: 6px;
+  flex: 1;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.window-select select {
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: #fff;
+  font: inherit;
+}
+
+.close-button {
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.window-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 14px 0;
+}
+
+.window-meta span {
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: #e2e8f0;
+  color: #475569;
+  font-size: 12px;
+}
+
+.page-card {
+  min-height: 420px;
+  padding: 20px;
+  border-radius: 18px;
+  background: #fff;
+  color: #0f172a;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 18px;
+  line-height: 2;
+  overflow: auto;
+}
+
+.page-paragraph {
+  margin: 0 0 1.2em;
+  text-align: justify;
+}
+
+.word-chip {
+  display: inline;
+  border-radius: 8px;
+  padding: 1px 2px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.word-chip:hover {
+  background: #dbeafe;
+}
+
+.pager {
+  margin-top: 14px;
+}
+
+.pager button,
+.action-row button,
+.library-actions button {
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: #0f172a;
+  color: #fff;
+}
+
+.pager button:disabled,
+.action-row button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.tool-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.library-list,
+.book-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 12px;
+}
+
+.library-list li,
+.book-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.library-list strong,
+.book-list strong {
+  color: #0f172a;
+}
+
+.library-list p,
+.book-list p,
+.current-word,
+.translation-result,
+.sentence-preview,
+.tip {
+  margin: 4px 0 0;
+  color: #64748b;
+}
+
+.library-list small,
+.phonetic {
+  color: #94a3b8;
+}
+
+.danger {
+  background: #fee2e2 !important;
+  color: #b91c1c !important;
+}
+
+.current-word {
+  min-height: 28px;
+  font-size: 18px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.translation-result,
+.sentence-preview {
+  line-height: 1.8;
+}
+
+.detail {
+  margin-top: 14px;
+}
+
+.detail h5 {
+  margin: 0 0 8px;
+  color: #475569;
+}
+
+.detail ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+  color: #334155;
+}
+
+.empty,
+.empty-page,
+.empty-shell {
+  color: #64748b;
+}
+
+.empty-shell {
+  padding: 40px 20px;
+  border-radius: 20px;
+  background: #f8fafc;
+  text-align: center;
+}
+
+@media (max-width: 1200px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .window-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .reader-head,
+  .settings-bar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .head-actions,
+  .window-head,
+  .pager,
+  .library-actions,
+  .action-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
 </style>

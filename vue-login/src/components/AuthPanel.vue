@@ -13,7 +13,7 @@ const emit = defineEmits(['authenticated'])
 
 const mode = ref('login')
 const loading = ref(false)
-const healthText = ref('正在连接服务...')
+const healthText = ref('正在连接智学助手服务...')
 const localMessage = reactive({
   type: '',
   text: '',
@@ -34,7 +34,7 @@ const registerForm = reactive({
 const checkHealth = async () => {
   try {
     const result = await apiRequest('/api/health')
-    healthText.value = `服务正常，数据库 ${result.database} 已连接`
+    healthText.value = `服务正常，当前数据库：${result.database}`
   } catch (error) {
     healthText.value = error.message
   }
@@ -45,7 +45,7 @@ checkHealth()
 const handleLogin = async () => {
   if (!loginForm.username.trim() || !loginForm.password.trim()) {
     localMessage.type = 'error'
-    localMessage.text = '请输入用户名和密码。'
+    localMessage.text = '请输入账号和密码。'
     return
   }
 
@@ -106,23 +106,23 @@ const handleRegister = async () => {
 <template>
   <section class="auth-layout">
     <div class="hero-panel">
-      <p class="eyebrow">Control Center</p>
-      <h1>一个登录入口，直接进入你的数据后台。</h1>
+      <p class="eyebrow">Smart Study Hub</p>
+      <h1>进入智学助手，开始你的西语与考研双线学习。</h1>
       <p class="hero-copy">
-        首页支持注册，登录后进入左侧导航后台。你可以查看大屏统计、管理个人信息，还能继续手动添加新的功能页。
+        登录后可直接进入学习工作台，查看今日任务、学习进度、沉浸阅读和个人资料。首页也支持快速注册，方便我们后续扩展多用户使用。
       </p>
       <div class="hero-metrics">
         <article>
-          <strong>实时</strong>
-          <span>在线人数与活跃会话</span>
+          <strong>今日任务</strong>
+          <span>自动生成西语练习与考研复习清单</span>
         </article>
         <article>
-          <strong>可扩展</strong>
-          <span>左侧功能栏支持继续新增</span>
+          <strong>学习工作台</strong>
+          <span>集中展示进度、提醒、数据看板与功能页</span>
         </article>
         <article>
-          <strong>个人中心</strong>
-          <span>头像、账号、密码都能改</span>
+          <strong>个人成长</strong>
+          <span>支持头像、账号、密码与学习偏好维护</span>
         </article>
       </div>
     </div>
@@ -145,7 +145,7 @@ const handleRegister = async () => {
         <input id="login-password" v-model="loginForm.password" autocomplete="current-password" placeholder="请输入密码" type="password" />
 
         <button class="submit-button" :disabled="loading" type="submit">
-          {{ loading ? '登录中...' : '进入后台' }}
+          {{ loading ? '登录中...' : '进入学习工作台' }}
         </button>
       </form>
 
@@ -160,10 +160,16 @@ const handleRegister = async () => {
         <input id="register-password" v-model="registerForm.password" autocomplete="new-password" placeholder="不少于 6 位" type="password" />
 
         <label for="register-confirm-password">确认密码</label>
-        <input id="register-confirm-password" v-model="registerForm.confirmPassword" autocomplete="new-password" placeholder="再次输入密码" type="password" />
+        <input
+          id="register-confirm-password"
+          v-model="registerForm.confirmPassword"
+          autocomplete="new-password"
+          placeholder="再次输入密码"
+          type="password"
+        />
 
         <button class="submit-button" :disabled="loading" type="submit">
-          {{ loading ? '注册中...' : '注册并进入后台' }}
+          {{ loading ? '注册中...' : '注册并进入学习工作台' }}
         </button>
       </form>
     </div>
@@ -171,29 +177,174 @@ const handleRegister = async () => {
 </template>
 
 <style scoped>
-.auth-layout { width: min(1180px, 100%); display: grid; grid-template-columns: 1.2fr 0.9fr; gap: 28px; align-items: stretch; }
-.hero-panel, .auth-card { border-radius: 32px; padding: 32px; backdrop-filter: blur(18px); }
-.hero-panel { color: #eff6ff; background: linear-gradient(160deg, rgba(11,37,69,.95), rgba(14,116,144,.88)); box-shadow: 0 28px 80px rgba(15,23,42,.24); }
-.eyebrow { margin: 0 0 16px; color: #bae6fd; font-size: 12px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
-h1 { margin: 0; font-size: clamp(32px, 4vw, 54px); line-height: 1.05; }
-.hero-copy { max-width: 560px; margin: 18px 0 26px; color: rgba(239,246,255,.82); font-size: 17px; line-height: 1.7; }
-.hero-metrics { display: grid; gap: 14px; }
-.hero-metrics article { padding: 18px 20px; border: 1px solid rgba(186,230,253,.16); border-radius: 20px; background: rgba(15,23,42,.18); }
-.hero-metrics strong { display: block; margin-bottom: 6px; font-size: 20px; }
-.hero-metrics span { color: rgba(239,246,255,.72); }
-.auth-card { border: 1px solid rgba(148,163,184,.2); background: rgba(255,255,255,.9); box-shadow: 0 28px 80px rgba(15,23,42,.14); }
-.auth-tabs { display: inline-grid; grid-template-columns: repeat(2, 1fr); gap: 8px; padding: 6px; border-radius: 999px; background: #e2e8f0; }
-.auth-tabs button { border: none; border-radius: 999px; padding: 10px 18px; background: transparent; color: #475569; font-size: 14px; font-weight: 700; cursor: pointer; }
-.auth-tabs button.active { background: #fff; color: #0f172a; box-shadow: 0 10px 18px rgba(15,23,42,.08); }
-.health { margin: 20px 0 12px; color: #0369a1; font-size: 14px; }
-.auth-form { display: grid; gap: 12px; }
-label { font-size: 14px; font-weight: 700; }
-input { width: 100%; border: 1px solid #cbd5e1; border-radius: 16px; padding: 14px 16px; font-size: 15px; transition: border-color .2s ease, box-shadow .2s ease; }
-input:focus { border-color: #0ea5e9; box-shadow: 0 0 0 4px rgba(14,165,233,.12); outline: none; }
-.submit-button { margin-top: 8px; border: none; border-radius: 16px; padding: 14px 18px; background: linear-gradient(135deg, #0f766e, #0284c7); color: #fff; font-size: 16px; font-weight: 700; cursor: pointer; }
-.submit-button:disabled { opacity: .72; cursor: not-allowed; }
-.message { margin: 12px 0; border-radius: 14px; padding: 12px 14px; font-size: 14px; }
-.message.error { background: #fff1f2; color: #be123c; }
-@media (max-width: 960px) { .auth-layout { grid-template-columns: 1fr; } }
-@media (max-width: 600px) { .hero-panel, .auth-card { padding: 24px; } }
+.auth-layout {
+  width: min(1180px, 100%);
+  display: grid;
+  grid-template-columns: 1.2fr 0.9fr;
+  gap: 28px;
+  align-items: stretch;
+}
+
+.hero-panel,
+.auth-card {
+  border-radius: 32px;
+  padding: 32px;
+  backdrop-filter: blur(18px);
+}
+
+.hero-panel {
+  color: #eff6ff;
+  background: linear-gradient(160deg, rgba(11, 37, 69, 0.95), rgba(14, 116, 144, 0.88));
+  box-shadow: 0 28px 80px rgba(15, 23, 42, 0.24);
+}
+
+.eyebrow {
+  margin: 0 0 16px;
+  color: #bae6fd;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(32px, 4vw, 54px);
+  line-height: 1.05;
+}
+
+.hero-copy {
+  max-width: 560px;
+  margin: 18px 0 26px;
+  color: rgba(239, 246, 255, 0.82);
+  font-size: 17px;
+  line-height: 1.7;
+}
+
+.hero-metrics {
+  display: grid;
+  gap: 14px;
+}
+
+.hero-metrics article {
+  padding: 18px 20px;
+  border: 1px solid rgba(186, 230, 253, 0.16);
+  border-radius: 20px;
+  background: rgba(15, 23, 42, 0.18);
+}
+
+.hero-metrics strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 20px;
+}
+
+.hero-metrics span {
+  color: rgba(239, 246, 255, 0.72);
+}
+
+.auth-card {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 28px 80px rgba(15, 23, 42, 0.14);
+}
+
+.auth-tabs {
+  display: inline-grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  padding: 6px;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.auth-tabs button {
+  border: none;
+  border-radius: 999px;
+  padding: 10px 18px;
+  background: transparent;
+  color: #475569;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.auth-tabs button.active {
+  background: #fff;
+  color: #0f172a;
+  box-shadow: 0 10px 18px rgba(15, 23, 42, 0.08);
+}
+
+.health {
+  margin: 20px 0 12px;
+  color: #0369a1;
+  font-size: 14px;
+}
+
+.auth-form {
+  display: grid;
+  gap: 12px;
+}
+
+label {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+input {
+  width: 100%;
+  border: 1px solid #cbd5e1;
+  border-radius: 16px;
+  padding: 14px 16px;
+  font-size: 15px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+input:focus {
+  border-color: #0ea5e9;
+  box-shadow: 0 0 0 4px rgba(14, 165, 233, 0.12);
+  outline: none;
+}
+
+.submit-button {
+  margin-top: 8px;
+  border: none;
+  border-radius: 16px;
+  padding: 14px 18px;
+  background: linear-gradient(135deg, #0f766e, #0284c7);
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.submit-button:disabled {
+  opacity: 0.72;
+  cursor: not-allowed;
+}
+
+.message {
+  margin: 12px 0;
+  border-radius: 14px;
+  padding: 12px 14px;
+  font-size: 14px;
+}
+
+.message.error {
+  background: #fff1f2;
+  color: #be123c;
+}
+
+@media (max-width: 960px) {
+  .auth-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 600px) {
+  .hero-panel,
+  .auth-card {
+    padding: 24px;
+  }
+}
 </style>

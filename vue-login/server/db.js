@@ -9,6 +9,7 @@ const connectionOptions = {
   port: Number(process.env.MYSQL_PORT || 3306),
   user: process.env.MYSQL_USER || 'root',
   password: process.env.MYSQL_PASSWORD || '',
+  charset: 'utf8mb4',
 }
 
 const databaseName = process.env.MYSQL_DATABASE || 'vue_login'
@@ -16,6 +17,9 @@ const usersTable = process.env.MYSQL_USERS_TABLE || 'users'
 const sessionsTable = 'user_sessions'
 const featurePagesTable = 'feature_pages'
 const pageViewsTable = 'page_views'
+const studyProfilesTable = 'study_profiles'
+const studyTasksTable = 'study_tasks'
+const studyLogsTable = 'study_logs'
 
 export const createServerConnection = () => mysql.createConnection(connectionOptions)
 
@@ -126,6 +130,57 @@ export const ensureDatabase = async () => {
       )
     `)
 
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS \`${studyProfilesTable}\` (
+        id INT NOT NULL AUTO_INCREMENT,
+        user_id INT NOT NULL,
+        spanish_level VARCHAR(24) NOT NULL DEFAULT 'A1',
+        exam_target VARCHAR(120) NULL,
+        exam_date DATE NULL,
+        target_school VARCHAR(120) NULL,
+        daily_study_minutes INT NOT NULL DEFAULT 120,
+        focus_notes TEXT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uniq_study_profile_user (user_id),
+        CONSTRAINT fk_study_profile_user FOREIGN KEY (user_id) REFERENCES \`${usersTable}\` (id) ON DELETE CASCADE
+      )
+    `)
+
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS \`${studyTasksTable}\` (
+        id INT NOT NULL AUTO_INCREMENT,
+        user_id INT NOT NULL,
+        track VARCHAR(32) NOT NULL,
+        title VARCHAR(160) NOT NULL,
+        description TEXT NULL,
+        estimated_minutes INT NOT NULL DEFAULT 20,
+        status VARCHAR(24) NOT NULL DEFAULT 'pending',
+        scheduled_for DATE NOT NULL,
+        sort_order INT NOT NULL DEFAULT 0,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_study_task_user_date (user_id, scheduled_for),
+        CONSTRAINT fk_study_task_user FOREIGN KEY (user_id) REFERENCES \`${usersTable}\` (id) ON DELETE CASCADE
+      )
+    `)
+
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS \`${studyLogsTable}\` (
+        id INT NOT NULL AUTO_INCREMENT,
+        user_id INT NOT NULL,
+        log_type VARCHAR(40) NOT NULL,
+        minutes_spent INT NOT NULL DEFAULT 0,
+        payload_json JSON NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_study_log_user_created (user_id, created_at),
+        CONSTRAINT fk_study_log_user FOREIGN KEY (user_id) REFERENCES \`${usersTable}\` (id) ON DELETE CASCADE
+      )
+    `)
+
     await connection.query(
       `INSERT INTO \`${usersTable}\` (username, password, display_name, avatar_url, bio)
        VALUES (?, ?, ?, ?, ?)
@@ -139,7 +194,7 @@ export const ensureDatabase = async () => {
         '123456',
         '系统管理员',
         'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=300&q=80',
-        '负责维护系统公告、功能页和站点总览数据。',
+        '正在使用智学助手规划西语学习和考研复习。',
       ],
     )
 
@@ -150,12 +205,12 @@ export const ensureDatabase = async () => {
          description = VALUES(description),
          content = VALUES(content)`,
       [
-        '运营日报',
-        'operations-report',
-        'OP',
+        '学习札记',
+        'study-notes',
+        'NT',
         1,
-        '查看今天的站点波动、活跃时段和重点提醒。',
-        '这里可以放日报、待办、值班说明，后续你也可以在左侧新增更多功能页。',
+        '记录今天的西语难点、考研错题和复盘想法。',
+        '这里可以整理单词、语法、阅读摘录和阶段性复盘内容。',
       ],
     )
   } finally {
@@ -170,5 +225,8 @@ export {
   featurePagesTable,
   pageViewsTable,
   sessionsTable,
+  studyLogsTable,
+  studyProfilesTable,
+  studyTasksTable,
   usersTable,
 }

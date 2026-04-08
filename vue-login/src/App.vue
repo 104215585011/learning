@@ -15,6 +15,23 @@ const stats = ref({
   todayLogins: 0,
 })
 const pages = ref([])
+const studyProfile = ref({
+  spanishLevel: 'A1',
+  examTarget: '',
+  targetSchool: '',
+  examDate: '',
+  dailyStudyMinutes: 120,
+  focusNotes: '',
+})
+const todayTasks = ref([])
+const learningStats = ref({
+  totalTasks: 0,
+  completedTasks: 0,
+  completedMinutes: 0,
+  weeklyMinutes: 0,
+  streakDays: 0,
+  examCountdown: null,
+})
 const activePage = ref('home')
 const booting = ref(Boolean(token.value))
 const globalMessage = ref('')
@@ -22,15 +39,22 @@ let heartbeatTimer = null
 
 const isAuthenticated = computed(() => Boolean(token.value && user.value))
 
+const applyBootstrap = (data) => {
+  user.value = data.user
+  stats.value = data.stats
+  pages.value = data.pages
+  studyProfile.value = data.studyProfile
+  todayTasks.value = data.todayTasks
+  learningStats.value = data.learningStats
+}
+
 const loadBootstrap = async () => {
   if (!token.value) return
   booting.value = true
 
   try {
     const data = await apiRequest('/api/bootstrap', { token: token.value })
-    user.value = data.user
-    stats.value = data.stats
-    pages.value = data.pages
+    applyBootstrap(data)
     globalMessage.value = ''
   } catch (error) {
     token.value = ''
@@ -103,6 +127,7 @@ const handleLogout = async () => {
   token.value = ''
   user.value = null
   pages.value = []
+  todayTasks.value = []
   activePage.value = 'home'
   localStorage.removeItem(SESSION_KEY)
 }
@@ -123,12 +148,9 @@ const handleUploadAvatar = async (file) => {
 
   const response = await fetch('/api/upload-avatar', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token.value}`,
-    },
+    headers: { Authorization: `Bearer ${token.value}` },
     body: formData,
   })
-
   const data = await response.json()
 
   if (!response.ok || data.ok === false) {
@@ -136,6 +158,36 @@ const handleUploadAvatar = async (file) => {
   }
 
   user.value = data.user
+  globalMessage.value = data.message
+}
+
+const handleStudyProfileSaved = async (form) => {
+  const data = await apiRequest('/api/study/profile', {
+    method: 'PUT',
+    token: token.value,
+    body: form,
+  })
+  studyProfile.value = data.studyProfile
+  globalMessage.value = data.message
+}
+
+const handleRefreshTasks = async () => {
+  const data = await apiRequest('/api/study/tasks/refresh', {
+    method: 'POST',
+    token: token.value,
+  })
+  todayTasks.value = data.todayTasks
+  learningStats.value = data.learningStats
+  globalMessage.value = data.message
+}
+
+const handleToggleTask = async (taskId) => {
+  const data = await apiRequest(`/api/study/tasks/${taskId}/toggle`, {
+    method: 'POST',
+    token: token.value,
+  })
+  todayTasks.value = data.todayTasks
+  learningStats.value = data.learningStats
   globalMessage.value = data.message
 }
 
@@ -178,23 +230,20 @@ const handleDeletePage = async (id) => {
 const handleMovePage = async ({ id, direction }) => {
   const index = pages.value.findIndex((page) => page.id === id)
   const targetIndex = index + direction
-
-  if (index < 0 || targetIndex < 0 || targetIndex >= pages.value.length) {
-    return
-  }
+  if (index < 0 || targetIndex < 0 || targetIndex >= pages.value.length) return
 
   const reordered = [...pages.value]
   ;[reordered[index], reordered[targetIndex]] = [reordered[targetIndex], reordered[index]]
 
-  const payload = reordered.map((page, orderIndex) => ({
-    id: page.id,
-    sortOrder: orderIndex + 1,
-  }))
-
   const data = await apiRequest('/api/pages/reorder', {
     method: 'PUT',
     token: token.value,
-    body: { pages: payload },
+    body: {
+      pages: reordered.map((page, orderIndex) => ({
+        id: page.id,
+        sortOrder: orderIndex + 1,
+      })),
+    },
   })
 
   pages.value = data.pages
@@ -222,7 +271,7 @@ onBeforeUnmount(() => {
 
 <template>
   <main class="app-shell">
-    <div v-if="booting" class="loading-state">正在恢复登录状态...</div>
+    <div v-if="booting" class="loading-state">正在恢复学习空间...</div>
 
     <AuthPanel v-else-if="!isAuthenticated" :global-message="globalMessage" @authenticated="applyAuth" />
 
@@ -230,8 +279,11 @@ onBeforeUnmount(() => {
       v-else
       :active-page="activePage"
       :global-message="globalMessage"
+      :learning-stats="learningStats"
       :pages="pages"
       :stats="stats"
+      :study-profile="studyProfile"
+      :today-tasks="todayTasks"
       :token="token"
       :user="user"
       @create-page="handleCreatePage"
@@ -239,7 +291,10 @@ onBeforeUnmount(() => {
       @logout="handleLogout"
       @move-page="handleMovePage"
       @navigate="activePage = $event"
+      @refresh-tasks="handleRefreshTasks"
       @save-profile="handleProfileSaved"
+      @save-study-profile="handleStudyProfileSaved"
+      @toggle-task="handleToggleTask"
       @upload-avatar="handleUploadAvatar"
       @update-page="handleUpdatePage"
     />
